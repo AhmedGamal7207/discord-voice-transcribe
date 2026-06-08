@@ -88,7 +88,7 @@ MAX_CHUNK_SECONDS=12
 SILENCE_FLUSH_SECONDS=0.8
 TRANSCRIPTION_WORKERS=1
 WHISPER_BEAM_SIZE=1
-LOG_LEVEL=INFO
+DEBUG_LOGS=false
 VERBOSE_VOICE_RECV_LOGS=false
 ```
 
@@ -107,3 +107,19 @@ LOG_LEVEL=DEBUG
 Then check whether DAVE decryption is failing, the SSRC-to-user mapping is missing, or the voice session never becomes ready.
 
 Set `VERBOSE_VOICE_RECV_LOGS=true` only when debugging the receive extension itself. It produces a lot of RTCP packet noise.
+
+## Console output
+
+Normal output is intentionally minimal:
+
+```text
+15:12:04 | START      | Discord voice transcriber starting
+15:12:05 | LOGIN      | Whisper#7842 is online
+15:12:18 | VOICE      | Joined 'Meeting' in Company Server
+15:12:22 | MODEL      | Loading Whisper 'base' on cpu (int8)
+15:12:25 | MODEL      | Whisper model ready
+15:12:31 | SPEECH     | Jimmy: Hello Amir
+15:12:36 | SPEECH     | Amir: Hello Jimmy how are you
+```
+
+Set `DEBUG_LOGS=true` only when you need raw Discord/library internals for troubleshooting.

@@ -2,8 +2,10 @@ import asyncio
 import logging
 import os
 import threading
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Optional
 
 import discord
@@ -19,6 +21,8 @@ from faster_whisper import WhisperModel
 
 load_dotenv()
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+warnings.filterwarnings("ignore", message=".*HF_TOKEN.*")
+warnings.filterwarnings("ignore", message=".*cache-system uses symlinks.*")
 
 DISCORD_SAMPLE_RATE = 48_000
 WHISPER_SAMPLE_RATE = 16_000
@@ -27,6 +31,10 @@ SAMPLE_WIDTH = 2
 BYTES_PER_SECOND = DISCORD_SAMPLE_RATE * CHANNELS * SAMPLE_WIDTH
 
 log = logging.getLogger("discord_voice_transcribe")
+
+
+def console(event: str, message: str) -> None:
+    print(f"{datetime.now():%H:%M:%S} | {event:<10} | {message}", flush=True)
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -83,6 +91,7 @@ class Settings:
     silence_flush_seconds: float = _env_float("SILENCE_FLUSH_SECONDS", 0.8)
     transcription_workers: int = _env_int("TRANSCRIPTION_WORKERS", 1)
     post_transcripts_to_discord: bool = _env_bool("POST_TRANSCRIPTS_TO_DISCORD", False)
+    debug_logs: bool = _env_bool("DEBUG_LOGS", False)
     verbose_voice_recv_logs: bool = _env_bool("VERBOSE_VOICE_RECV_LOGS", False)
 
 
@@ -229,26 +238,22 @@ class WhisperTranscriber:
                 if self._model is None:
                     device = self._model_device()
                     compute_type = self._model_compute_type()
-                    log.info(
-                        "Loading faster-whisper model=%s device=%s compute_type=%s",
-                        self.config.whisper_model,
-                        device,
-                        compute_type,
+                    console(
+                        "MODEL",
+                        f"Loading Whisper '{self.config.whisper_model}' on {device} ({compute_type})",
                     )
                     self._model = WhisperModel(
                         self.config.whisper_model,
                         device=device,
                         compute_type=compute_type,
                     )
+                    console("MODEL", "Whisper model ready")
         return self._model
 
     def _fallback_to_cpu(self) -> None:
         with self._model_lock:
             if not self._force_cpu:
-                log.warning(
-                    "CUDA runtime is unavailable for faster-whisper; falling back to CPU int8. "
-                    "Set WHISPER_DEVICE=cpu to skip this retry on Windows."
-                )
+                console("MODEL", "CUDA unavailable; retrying with CPU int8")
             self._force_cpu = True
             self._model = None
 
@@ -306,6 +311,7 @@ class WhisperTranscriber:
                         pcm_bytes,
                     )
                 except Exception:
+                    console("ERROR", f"Could not transcribe audio for {member.name}")
                     log.exception("Failed to transcribe audio for user_id=%s", member.id)
                     return
 
@@ -314,7 +320,7 @@ class WhisperTranscriber:
 
         name = getattr(member, "display_name", None) or member.name
         line = f"{name}: {text}"
-        print(line, flush=True)
+        console("SPEECH", line)
 
         if self.config.post_transcripts_to_discord and text_channel is not None:
             try:
@@ -457,11 +463,13 @@ async def _connect_and_listen(
 
     consent_note = "Make sure everyone in the voice channel knows transcription is active."
     await ctx.reply(f"Joined **{channel.name}** and started live transcription. {consent_note}")
+    guild_name = ctx.guild.name if ctx.guild else "Direct Message"
+    console("VOICE", f"Joined '{channel.name}' in {guild_name}")
 
 
 @bot.event
 async def on_ready() -> None:
-    log.info("Logged in as %s (id=%s)", bot.user, bot.user.id if bot.user else "unknown")
+    console("LOGIN", f"{bot.user} is online")
 
 
 @bot.command()
@@ -514,24 +522,47 @@ async def leave(ctx: commands.Context) -> None:
 
     await vc.disconnect(force=False)
     await ctx.reply("Stopped transcription and left the voice channel.")
+    console("VOICE", "Stopped transcription and left the channel")
 
 
 @bot.event
 async def on_command_error(ctx: commands.Context, error: commands.CommandError) -> None:
     if isinstance(error, commands.CommandNotFound):
         return
+    console("ERROR", f"Command failed: {error}")
     log.exception("Command failed", exc_info=error)
     await ctx.reply(f"Command failed: `{error}`")
 
 
 async def main() -> None:
-    log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+    log_level = os.getenv("LOG_LEVEL", "DEBUG" if settings.debug_logs else "WARNING").upper()
     logging.basicConfig(
-        level=log_level,
+        level=log_level if settings.debug_logs else logging.WARNING,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    for noisy_logger in ("filelock", "httpcore", "httpx", "huggingface_hub"):
-        logging.getLogger(noisy_logger).setLevel(logging.WARNING)
+    quiet_loggers = (
+        "discord",
+        "discord.client",
+        "discord.gateway",
+        "discord.http",
+        "discord.voice_state",
+        "discord.opus",
+        "discord.ext.voice_recv",
+        "faster_whisper",
+        "filelock",
+        "httpcore",
+        "httpx",
+        "huggingface_hub",
+    )
+    for logger_name in quiet_loggers:
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
+    logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+    logging.getLogger("huggingface_hub.utils._http").setLevel(logging.ERROR)
+
+    if settings.debug_logs:
+        logging.getLogger("discord_voice_transcribe").setLevel(logging.DEBUG)
+        logging.getLogger("discord").setLevel(getattr(logging, log_level, logging.DEBUG))
+        logging.getLogger("faster_whisper").setLevel(getattr(logging, log_level, logging.DEBUG))
 
     if not settings.verbose_voice_recv_logs:
         logging.getLogger("discord.ext.voice_recv.gateway").setLevel(logging.WARNING)
@@ -541,6 +572,7 @@ async def main() -> None:
     if not settings.token:
         raise RuntimeError("DISCORD_TOKEN is missing from .env or the environment")
 
+    console("START", "Discord voice transcriber starting")
     async with bot:
         await bot.start(settings.token)
 
